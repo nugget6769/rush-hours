@@ -176,4 +176,201 @@ const LEVEL2 = [
   { id:'B',       length:2, orientation:'h', x:3, y:0, color:'#44cc88' },
   { id:'C',       length:3, orientation:'v', x:2, y:1, color:'#ffaa00' },
   { id:'D',       length:2, orientation:'v', x:4, y:1, color:'#ff88cc' },
-  { id:'E',
+  { id:'E',       length:2, orientation:'v', x:1, y:3, color:'#cc44ff' },
+  { id:'F',       length:2, orientation:'v', x:5, y:3, color:'#44ccff' },
+  { id:'G',       length:2, orientation:'h', x:3, y:4, color:'#ffcc44' },
+  { id:'H',       length:3, orientation:'h', x:0, y:5, color:'#88ff44' },
+  { id:'I',       length:2, orientation:'h', x:4, y:5, color:'#ff6644' },
+];
+
+const LEVELS = [LEVEL0, LEVEL1, LEVEL2];
+
+// ── 執行期驗證
+function getCells(car) {
+  const out = [];
+  for (let i = 0; i < car.length; i++)
+    out.push({ x: car.orientation==='h' ? car.x+i : car.x,
+               y: car.orientation==='v' ? car.y+i : car.y });
+  return out;
+}
+
+(function validateAll() {
+  LEVELS.forEach((lvl, li) => {
+    const seen = new Map();
+    lvl.forEach(car => {
+      getCells(car).forEach(({x,y}) => {
+        const k = `${x},${y}`;
+        if (seen.has(k)) console.error(`L${li}: ${car.id} overlaps ${seen.get(k)} at (${k})`);
+        else seen.set(k, car.id);
+        if (x<0||x>5||y<0||y>5) console.error(`L${li}: ${car.id} out of bounds at (${x},${y})`);
+      });
+    });
+  });
+})();
+
+// ── STATE
+let currentLevel = 0, cars = [], moves = 0, history = [];
+const bestScores = [null, null, null];
+const GRID = 6;
+let activeDragCarId = null;
+
+const cs = () => parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--cell')) || 72;
+const gs = () => parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--gap'))  || 4;
+
+// ── LEVEL MANAGEMENT
+function loadLevel(idx) {
+  currentLevel = idx;
+  document.querySelectorAll('.level-btn').forEach((b,i) => b.classList.toggle('active', i===idx));
+  cars = LEVELS[idx].map(c => ({...c}));
+  moves = 0; history = [];
+  activeDragCarId = null;
+  updateMoveCount();
+  render();
+  document.getElementById('win-overlay').classList.remove('visible');
+}
+function resetLevel() { loadLevel(currentLevel); }
+function nextLevel()  { loadLevel((currentLevel+1) % LEVELS.length); }
+function undoMove() {
+  if (!history.length) return;
+  const snap = history.pop();
+  cars = snap.cars.map(c => ({...c}));
+  moves = snap.moves;
+  updateMoveCount();
+  render();
+}
+
+// ── RENDER
+function render() {
+  const board = document.getElementById('board');
+  board.innerHTML = '';
+  for (let r=0; r<GRID; r++)
+    for (let c=0; c<GRID; c++) {
+      const d = document.createElement('div');
+      d.className = 'cell' + (r===2 ? ' exit-row' : '');
+      board.appendChild(d);
+    }
+
+  const layer = document.createElement('div');
+  layer.className = 'cars-layer';
+  board.appendChild(layer);
+
+  const C = cs(), G = gs();
+  cars.forEach(car => {
+    const el = document.createElement('div');
+    el.className = 'car';
+    el.dataset.id = car.id;
+    const isH = car.orientation==='h';
+    const w = isH ? car.length*C + (car.length-1)*G : C;
+    const h = isH ? C : car.length*C + (car.length-1)*G;
+    el.style.cssText = `
+      width:${w}px; height:${h}px;
+      left:${car.x*(C+G)}px; top:${car.y*(C+G)}px;
+      background:${car.color};
+      box-shadow:0 4px 16px ${car.color}55,inset 0 1px 0 rgba(255,255,255,.2);
+      opacity:.93;
+    `;
+    if (car.id==='red_car')
+      el.innerHTML = `<span style="color:#fff;font-size:.8rem;font-weight:900;text-shadow:0 1px 3px rgba(0,0,0,.5)">EXIT →</span>`;
+    attachDrag(el, car);
+    if (car.id === activeDragCarId) el.classList.add('dragging');
+    layer.appendChild(el);
+  });
+}
+
+// ── COLLISION: 逐格路徑碰撞檢查
+function furthestPos(movingCar, targetPos) {
+  const isH = movingCar.orientation === 'h';
+  const cur = isH ? movingCar.x : movingCar.y;
+  if (targetPos === cur) return cur;
+  const dir = targetPos > cur ? 1 : -1;
+  let pos = cur;
+  while (pos !== targetPos) {
+    const next = pos + dir;
+    if (next < 0 || next > GRID - movingCar.length) break;
+    const testCells = getCells({ ...movingCar, [isH?'x':'y']: next });
+    let blocked = false;
+    for (const other of cars) {
+      if (other.id === movingCar.id) continue;
+      for (const oc of getCells(other)) {
+        if (testCells.some(tc => tc.x===oc.x && tc.y===oc.y)) { blocked=true; break; }
+      }
+      if (blocked) break;
+    }
+    if (blocked) break;
+    pos = next;
+  }
+  return pos;
+}
+
+// ── DRAG
+function attachDrag(el, car) {
+  let startMouse, startGridPos, moved = false;
+
+  const onStart = e => {
+    e.preventDefault();
+    const pt = e.touches ? e.touches[0] : e;
+    startMouse   = car.orientation==='h' ? pt.clientX : pt.clientY;
+    startGridPos = car.orientation==='h' ? car.x : car.y;
+    moved = false;
+    activeDragCarId = car.id;
+    document.addEventListener('mousemove', onMove);
+    document.addEventListener('touchmove', onMove, {passive:false});
+    document.addEventListener('mouseup',   onEnd);
+    document.addEventListener('touchend',  onEnd);
+  };
+
+  const onMove = e => {
+    if (e.cancelable) e.preventDefault();
+    const pt  = e.touches ? e.touches[0] : e;
+    const cur = car.orientation==='h' ? pt.clientX : pt.clientY;
+    const C = cs(), G = gs();
+    const raw  = startGridPos + (cur - startMouse) / (C + G);
+    const want = Math.max(0, Math.min(GRID - car.length, Math.round(raw)));
+    const reach = furthestPos(car, want);
+    const axis = car.orientation==='h' ? 'x' : 'y';
+    if (reach !== car[axis]) {
+      if (!moved) {
+        history.push({ cars: cars.map(c=>({...c})), moves });
+        moved = true;
+      }
+      car[axis] = reach;
+      render();
+    }
+  };
+
+  const onEnd = () => {
+    if (moved) { moves++; updateMoveCount(); checkWin(); }
+    activeDragCarId = null;
+    document.removeEventListener('mousemove', onMove);
+    document.removeEventListener('touchmove', onMove);
+    document.removeEventListener('mouseup',   onEnd);
+    document.removeEventListener('touchend',  onEnd);
+  };
+
+  el.addEventListener('mousedown',  onStart);
+  el.addEventListener('touchstart', onStart, {passive:false});
+}
+
+// ── WIN
+function checkWin() {
+  const red = cars.find(c => c.id==='red_car');
+  if (red && red.orientation==='h' && red.x + red.length >= GRID)
+    setTimeout(showWin, 200);
+}
+function showWin() {
+  if (!bestScores[currentLevel] || moves < bestScores[currentLevel])
+    bestScores[currentLevel] = moves;
+  document.getElementById('win-msg').textContent = `共移動 ${moves} 次`;
+  document.getElementById('win-overlay').classList.add('visible');
+  updateMoveCount();
+}
+function updateMoveCount() {
+  document.getElementById('move-count').textContent = moves;
+  document.getElementById('best-score').textContent = bestScores[currentLevel] ?? '—';
+}
+
+loadLevel(0);
+window.addEventListener('resize', render);
+</script>
+</body>
+</html>
